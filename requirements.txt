@@ -1,0 +1,9 @@
+# Streamlit web UI and CSV data analysis
+streamlit>=1.35.0
+pandas>=2.0.0
+
+# Optional Gemini API client (used only when GEMINI_API_KEY is configured via secrets/env)
+google-genai>=1.0.0
+
+# Test runner (core tools and tests also run directly with Python's built-in unittest)
+pytest>=7.0.0
