@@ -268,6 +268,595 @@ def _build_sample_inventory_csv() -> str:
 
 SAMPLE_INVENTORY_CSV = _build_sample_inventory_csv()
 
+PRODUCT_REQUIRED_COLUMNS = ["Product", "Category", "Units", "Unit Cost"]
+
+SAMPLE_PRODUCT_CSV = """Product,Category,Units,Unit Cost
+Industrial Bearing,Components,1200,4.50
+Copper Busbar,Components,850,18.00
+Precision Valve,Components,420,24.00
+Stainless Fastener,Hardware,3500,0.85
+Power Adapter,Hardware,1100,12.50
+Steel Bracket,Hardware,2400,3.20
+Sensor Module,Electronics,950,35.00
+Relay Switch,Electronics,1600,8.75
+Circuit Board,Electronics,680,52.00
+Control Unit,Electronics,310,115.00
+"""
+
+
+def validate_product_dataframe_columns(df: Any) -> Tuple[bool, List[str]]:
+    """Validate that Product, Category, Units, and Unit Cost columns are present."""
+    if df is None:
+        return False, list(PRODUCT_REQUIRED_COLUMNS)
+    cols = list(df.columns) if hasattr(df, "columns") else []
+    col_map = {str(c).strip().lower(): c for c in cols}
+    missing: List[str] = []
+    rename_map: Dict[str, str] = {}
+    for req in PRODUCT_REQUIRED_COLUMNS:
+        req_clean = req.lower()
+        if req in cols:
+            continue
+        elif req_clean in col_map:
+            rename_map[col_map[req_clean]] = req
+        else:
+            missing.append(req)
+
+    if rename_map and not missing and hasattr(df, "rename"):
+        df.rename(columns=rename_map, inplace=True)
+
+    return len(missing) == 0, missing
+
+
+def analyze_product_dataframe(df: Any) -> Dict[str, Any]:
+    """Perform pandas calculations on uploaded product DataFrame:
+    1. Calculate total Units.
+    2. Calculate average Unit Cost.
+    3. Identify the Product with the highest Units.
+    4. Group the data by Category and calculate total Units for each Category.
+    5. Create a new calculated column: Inventory Value = Units × Unit Cost.
+    6. Calculate total Inventory Value across all products.
+    """
+    if pd is None or df is None:
+        raise RuntimeError("pandas is required for DataFrame analysis.")
+
+    work_df = df.copy()
+
+    # Clean Units and Unit Cost to numeric types using pandas
+    if work_df["Units"].dtype == object:
+        work_df["Units"] = pd.to_numeric(
+            work_df["Units"].astype(str).str.replace(",", "").str.strip(),
+            errors="coerce",
+        ).fillna(0.0)
+    else:
+        work_df["Units"] = pd.to_numeric(work_df["Units"], errors="coerce").fillna(0.0)
+
+    if work_df["Unit Cost"].dtype == object:
+        work_df["Unit Cost"] = pd.to_numeric(
+            work_df["Unit Cost"].astype(str).str.replace("$", "").str.replace(",", "").str.strip(),
+            errors="coerce",
+        ).fillna(0.0)
+    else:
+        work_df["Unit Cost"] = pd.to_numeric(work_df["Unit Cost"], errors="coerce").fillna(0.0)
+
+    # 1. Calculate total Units
+    total_units = float(work_df["Units"].sum())
+
+    # 2. Calculate average Unit Cost
+    avg_unit_cost = float(work_df["Unit Cost"].mean()) if len(work_df) > 0 else 0.0
+
+    # 3. Identify the Product with the highest Units
+    if len(work_df) > 0:
+        max_idx = work_df["Units"].idxmax()
+        highest_units_product = str(work_df.loc[max_idx, "Product"])
+        highest_units_value = float(work_df.loc[max_idx, "Units"])
+    else:
+        highest_units_product = "N/A"
+        highest_units_value = 0.0
+
+    # 4. Group the data by Category and calculate total Units for each Category
+    units_by_category = (
+        work_df.groupby("Category", as_index=False)["Units"]
+        .sum()
+        .sort_values(by="Units", ascending=False)
+    )
+
+    # 5. Create a new calculated column: Inventory Value = Units × Unit Cost
+    work_df["Inventory Value"] = work_df["Units"] * work_df["Unit Cost"]
+
+    # 6. Calculate total Inventory Value across all products
+    total_inventory_value = float(work_df["Inventory Value"].sum())
+
+    return {
+        "num_rows": len(work_df),
+        "num_columns": len(work_df.columns),
+        "column_names": list(work_df.columns),
+        "total_units": total_units,
+        "avg_unit_cost": avg_unit_cost,
+        "highest_units_product": highest_units_product,
+        "highest_units_value": highest_units_value,
+        "category_summary": units_by_category,
+        "total_inventory_value": total_inventory_value,
+        "analyzed_df": work_df,
+    }
+
+
+def analyze_product_records(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Pure-Python fallback for analyzing product CSV records when pandas is unavailable."""
+    if not rows:
+        return {
+            "is_valid": False,
+            "missing": list(PRODUCT_REQUIRED_COLUMNS),
+            "num_rows": 0,
+            "num_columns": 0,
+            "column_names": [],
+            "total_units": 0.0,
+            "avg_unit_cost": 0.0,
+            "highest_units_product": "N/A",
+            "highest_units_value": 0.0,
+            "total_inventory_value": 0.0,
+            "category_summary": [],
+            "rows": [],
+        }
+
+    first = rows[0]
+    col_map = {str(k).strip().lower(): k for k in first.keys()}
+    missing: List[str] = [req for req in PRODUCT_REQUIRED_COLUMNS if req.lower() not in col_map]
+    if missing:
+        return {
+            "is_valid": False,
+            "missing": missing,
+            "num_rows": len(rows),
+            "num_columns": len(first.keys()),
+            "column_names": list(first.keys()),
+            "total_units": 0.0,
+            "avg_unit_cost": 0.0,
+            "highest_units_product": "N/A",
+            "highest_units_value": 0.0,
+            "total_inventory_value": 0.0,
+            "category_summary": [],
+            "rows": rows,
+        }
+
+    norm_rows: List[Dict[str, Any]] = []
+    for r in rows:
+        nr: Dict[str, Any] = {}
+        for k, v in r.items():
+            kl = str(k).strip().lower()
+            for rq in PRODUCT_REQUIRED_COLUMNS:
+                if rq.lower() == kl:
+                    nr[rq] = v
+        raw_u = str(nr.get("Units", 0)).replace(",", "").strip()
+        units_val = float(raw_u) if raw_u and raw_u.lower() != "none" else 0.0
+        raw_c = str(nr.get("Unit Cost", 0)).replace("$", "").replace(",", "").strip()
+        cost_val = float(raw_c) if raw_c and raw_c.lower() != "none" else 0.0
+        nr["Units"] = units_val
+        nr["Unit Cost"] = cost_val
+        nr["Inventory Value"] = units_val * cost_val
+        norm_rows.append(nr)
+
+    total_units = sum(r["Units"] for r in norm_rows)
+    avg_cost = sum(r["Unit Cost"] for r in norm_rows) / len(norm_rows) if norm_rows else 0.0
+    highest = max(norm_rows, key=lambda r: r["Units"]) if norm_rows else {"Product": "N/A", "Units": 0.0}
+    total_val = sum(r["Inventory Value"] for r in norm_rows)
+
+    cats: Dict[str, float] = {}
+    for r in norm_rows:
+        c = str(r.get("Category", "Unknown"))
+        cats[c] = cats.get(c, 0.0) + r["Units"]
+
+    cat_list = sorted(cats.items(), key=lambda x: x[1], reverse=True)
+
+    return {
+        "is_valid": True,
+        "missing": [],
+        "num_rows": len(norm_rows),
+        "num_columns": len(norm_rows[0].keys()) if norm_rows else 0,
+        "column_names": list(norm_rows[0].keys()) if norm_rows else [],
+        "total_units": total_units,
+        "avg_unit_cost": avg_cost,
+        "highest_units_product": highest["Product"],
+        "highest_units_value": highest["Units"],
+        "total_inventory_value": total_val,
+        "category_summary": cat_list,
+        "rows": norm_rows,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Multicriteria Inventory Classification (Sales & Hits -> A, B, C, D Classes)
+# ---------------------------------------------------------------------------
+
+CLASSIFICATION_REQUIRED_COLUMNS = ["Item Number", "Item Name", "UoM", "Sales ($)", "Hits"]
+
+SAMPLE_CLASSIFICATION_CSV = """Item Number,Item Name,UoM,Sales ($),Hits
+SKU-1001,Heavy Industrial Motor,EA,145000,420
+SKU-1002,Hydraulic Pump Assembly,EA,98000,310
+SKU-1003,Precision Bearings Box,BX,62000,850
+SKU-1004,Stainless Fastener Pack,BX,41000,1250
+SKU-1005,Control Circuit Board,EA,35000,280
+SKU-1006,Standard Copper Wire,RL,28000,640
+SKU-1007,Pneumatic Valve 1/2in,EA,19000,195
+SKU-1008,Thermal Sensor Module,EA,14000,520
+SKU-1009,Steel Mounting Bracket,EA,9500,410
+SKU-1010,Rubber Seal Ring Pack,PK,7200,980
+SKU-1011,LED Indicator Lamp,BX,4500,340
+SKU-1012,Brass Compression Fitting,EA,3100,210
+SKU-1013,Dust Filter Cartridge,EA,2200,140
+SKU-1014,Terminal Block Strip,EA,1100,95
+SKU-1015,Legacy Fuse 20A,BX,450,22
+"""
+
+_CLASSIFICATION_ALIAS_MAP: Dict[str, List[str]] = {
+    "item number": ["item number", "item_number", "item no", "item #", "item", "sku", "part number", "part_number"],
+    "item name": ["item name", "item_name", "item desc", "description", "product", "product name"],
+    "uom": ["uom", "unit of measure", "unit_of_measure", "unit"],
+    "sales ($)": ["sales ($)", "sales", "annual sales", "revenue", "sales_dollars", "total sales", "annual_sales"],
+    "hits": ["hits", "pick count", "order count", "frequency", "transactions", "order_lines", "picks"],
+}
+
+
+def validate_classification_dataframe_columns(df: Any) -> Tuple[bool, List[str]]:
+    """Validate that Item Number, Item Name, UoM, Sales ($), and Hits columns are present (with alias support)."""
+    if df is None:
+        return False, list(CLASSIFICATION_REQUIRED_COLUMNS)
+    cols = list(df.columns) if hasattr(df, "columns") else []
+    col_map = {str(c).strip().lower(): c for c in cols}
+
+    missing: List[str] = []
+    rename_map: Dict[str, str] = {}
+    for req in CLASSIFICATION_REQUIRED_COLUMNS:
+        req_clean = req.lower()
+        if req in cols:
+            continue
+        matched_col = None
+        for alias in _CLASSIFICATION_ALIAS_MAP.get(req_clean, [req_clean]):
+            if alias in col_map:
+                matched_col = col_map[alias]
+                break
+        if matched_col:
+            rename_map[matched_col] = req
+        else:
+            missing.append(req)
+
+    if rename_map and hasattr(df, "rename"):
+        df.rename(columns=rename_map, inplace=True)
+
+    return len(missing) == 0, missing
+
+
+def classify_inventory_dataframe(
+    df: Any,
+    sales_cutoffs: Tuple[float, float, float] = (0.70, 0.90, 0.98),
+    hits_cutoffs: Tuple[float, float, float] = (0.70, 0.90, 0.98),
+    method: str = "matrix",
+) -> Tuple[Any, Dict[str, Any]]:
+    """Perform multicriteria inventory classification into A, B, C, and D classes using pandas.
+
+    Uses Sales ($) and Hits to perform joint criteria classification:
+    - Sorts by Sales ($) descending, calculates cumulative % to assign Sales Class (A, B, C, D).
+    - Sorts by Hits descending, calculates cumulative % to assign Hits Class (A, B, C, D).
+    - Combines Sales Class and Hits Class into a single Multicriteria Classification (A, B, C, D).
+    """
+    if pd is None or df is None:
+        raise RuntimeError("pandas is required for DataFrame classification.")
+
+    work_df = df.copy()
+
+    # Clean numeric columns using pandas
+    for col in ["Sales ($)", "Hits"]:
+        if col in work_df.columns:
+            if work_df[col].dtype == object:
+                work_df[col] = pd.to_numeric(
+                    work_df[col].astype(str).str.replace("$", "").str.replace(",", "").str.strip(),
+                    errors="coerce",
+                ).fillna(0.0)
+            else:
+                work_df[col] = pd.to_numeric(work_df[col], errors="coerce").fillna(0.0)
+
+    # 1. Sales-based classification
+    total_sales = float(work_df["Sales ($)"].sum())
+    work_df = work_df.sort_values(by="Sales ($)", ascending=False).reset_index(drop=True)
+    if total_sales > 0:
+        work_df["Sales Cumulative"] = work_df["Sales ($)"].cumsum()
+        work_df["Sales Cumulative %"] = work_df["Sales Cumulative"] / total_sales
+    else:
+        work_df["Sales Cumulative"] = 0.0
+        work_df["Sales Cumulative %"] = 0.0
+
+    s_a, s_b, s_c = sales_cutoffs
+
+    def _assign_s_class(row):
+        val = row["Sales ($)"]
+        if val <= 0:
+            return "D"
+        cum = row["Sales Cumulative %"]
+        if cum <= s_a or (row.name == 0 and cum > s_a):
+            return "A"
+        elif cum <= s_b:
+            return "B"
+        elif cum <= s_c:
+            return "C"
+        else:
+            return "D"
+
+    work_df["Sales Class"] = work_df.apply(_assign_s_class, axis=1)
+
+    # 2. Hits-based classification
+    total_hits = float(work_df["Hits"].sum())
+    work_df = work_df.sort_values(by="Hits", ascending=False).reset_index(drop=True)
+    if total_hits > 0:
+        work_df["Hits Cumulative"] = work_df["Hits"].cumsum()
+        work_df["Hits Cumulative %"] = work_df["Hits Cumulative"] / total_hits
+    else:
+        work_df["Hits Cumulative"] = 0.0
+        work_df["Hits Cumulative %"] = 0.0
+
+    h_a, h_b, h_c = hits_cutoffs
+
+    def _assign_h_class(row):
+        val = row["Hits"]
+        if val <= 0:
+            return "D"
+        cum = row["Hits Cumulative %"]
+        if cum <= h_a or (row.name == 0 and cum > h_a):
+            return "A"
+        elif cum <= h_b:
+            return "B"
+        elif cum <= h_c:
+            return "C"
+        else:
+            return "D"
+
+    work_df["Hits Class"] = work_df.apply(_assign_h_class, axis=1)
+
+    # 3. Multicriteria Classification (A, B, C, D)
+    # Flores & Whybark joint criteria matrix mapping
+    matrix_map = {
+        ("A", "A"): "A",
+        ("A", "B"): "A",
+        ("B", "A"): "A",
+        ("A", "C"): "B",
+        ("C", "A"): "B",
+        ("B", "B"): "B",
+        ("B", "C"): "B",
+        ("C", "B"): "C",
+        ("A", "D"): "C",
+        ("D", "A"): "B",
+        ("B", "D"): "C",
+        ("D", "B"): "C",
+        ("C", "C"): "C",
+        ("C", "D"): "D",
+        ("D", "C"): "D",
+        ("D", "D"): "D",
+    }
+    priority_order = {"A": 1, "B": 2, "C": 3, "D": 4}
+    rev_priority = {1: "A", 2: "B", 3: "C", 4: "D"}
+
+    def _assign_multi_class(row):
+        sc = row["Sales Class"]
+        hc = row["Hits Class"]
+        if method == "priority":
+            p_val = min(priority_order.get(sc, 4), priority_order.get(hc, 4))
+            return rev_priority[p_val]
+        else:
+            return matrix_map.get((sc, hc), "C")
+
+    work_df["Classification"] = work_df.apply(_assign_multi_class, axis=1)
+    work_df["Multicriteria Matrix"] = work_df["Sales Class"] + "-" + work_df["Hits Class"]
+
+    # Re-sort by Sales ($) descending for clean presentation
+    work_df = work_df.sort_values(by="Sales ($)", ascending=False).reset_index(drop=True)
+
+    # Calculate summary aggregations by Classification class
+    class_order = ["A", "B", "C", "D"]
+    summary_rows = []
+    for cls in class_order:
+        sub = work_df[work_df["Classification"] == cls]
+        c_items = len(sub)
+        c_sales = float(sub["Sales ($)"].sum())
+        c_hits = float(sub["Hits"].sum())
+        pct_items = (c_items / len(work_df) * 100.0) if len(work_df) > 0 else 0.0
+        pct_sales = (c_sales / total_sales * 100.0) if total_sales > 0 else 0.0
+        pct_hits = (c_hits / total_hits * 100.0) if total_hits > 0 else 0.0
+        summary_rows.append({
+            "Class": cls,
+            "Item Count": c_items,
+            "% of Items": round(pct_items, 1),
+            "Total Sales ($)": c_sales,
+            "% of Sales": round(pct_sales, 1),
+            "Total Hits": c_hits,
+            "% of Hits": round(pct_hits, 1),
+        })
+
+    summary_df = pd.DataFrame(summary_rows)
+    crosstab_df = pd.crosstab(
+        work_df["Sales Class"],
+        work_df["Hits Class"],
+        margins=True,
+        margins_name="Total",
+    ).reindex(index=["A", "B", "C", "D", "Total"], columns=["A", "B", "C", "D", "Total"], fill_value=0)
+
+    stats = {
+        "num_rows": len(work_df),
+        "total_sales": total_sales,
+        "total_hits": total_hits,
+        "class_counts": {cls: len(work_df[work_df["Classification"] == cls]) for cls in class_order},
+        "summary_df": summary_df,
+        "crosstab_df": crosstab_df,
+    }
+
+    return work_df, stats
+
+
+def classify_inventory_records(
+    rows: List[Dict[str, Any]],
+    sales_cutoffs: Tuple[float, float, float] = (0.70, 0.90, 0.98),
+    hits_cutoffs: Tuple[float, float, float] = (0.70, 0.90, 0.98),
+    method: str = "matrix",
+) -> Dict[str, Any]:
+    """Pure-Python fallback for multicriteria inventory classification when pandas is unavailable."""
+    if not rows:
+        return {
+            "is_valid": False,
+            "missing": list(CLASSIFICATION_REQUIRED_COLUMNS),
+            "num_rows": 0,
+            "rows": [],
+            "summary_rows": [],
+            "class_counts": {"A": 0, "B": 0, "C": 0, "D": 0},
+            "total_sales": 0.0,
+            "total_hits": 0.0,
+        }
+
+    first = rows[0]
+    col_map = {str(k).strip().lower(): k for k in first.keys()}
+    missing: List[str] = []
+    for req in CLASSIFICATION_REQUIRED_COLUMNS:
+        req_clean = req.lower()
+        if req in first:
+            continue
+        matched_alias = None
+        for alias in _CLASSIFICATION_ALIAS_MAP.get(req_clean, [req_clean]):
+            if alias in col_map:
+                matched_alias = col_map[alias]
+                break
+        if not matched_alias:
+            missing.append(req)
+
+    if missing:
+        return {
+            "is_valid": False,
+            "missing": missing,
+            "num_rows": len(rows),
+            "rows": rows,
+            "summary_rows": [],
+            "class_counts": {"A": 0, "B": 0, "C": 0, "D": 0},
+            "total_sales": 0.0,
+            "total_hits": 0.0,
+        }
+
+    norm_rows: List[Dict[str, Any]] = []
+    for r in rows:
+        nr: Dict[str, Any] = {}
+        for k, v in r.items():
+            kl = str(k).strip().lower()
+            mapped_key = None
+            for req, aliases in _CLASSIFICATION_ALIAS_MAP.items():
+                if kl == req or kl in aliases:
+                    for req_cap in CLASSIFICATION_REQUIRED_COLUMNS:
+                        if req_cap.lower() == req:
+                            mapped_key = req_cap
+                            break
+            if mapped_key:
+                nr[mapped_key] = v
+            else:
+                nr[k] = v
+
+        raw_s = str(nr.get("Sales ($)", 0)).replace("$", "").replace(",", "").strip()
+        sales_val = float(raw_s) if raw_s and raw_s.lower() != "none" else 0.0
+        raw_h = str(nr.get("Hits", 0)).replace(",", "").strip()
+        hits_val = float(raw_h) if raw_h and raw_h.lower() != "none" else 0.0
+
+        nr["Sales ($)"] = sales_val
+        nr["Hits"] = hits_val
+        norm_rows.append(nr)
+
+    # 1. Sales sorting & cumulative %
+    total_sales = sum(r["Sales ($)"] for r in norm_rows)
+    norm_rows.sort(key=lambda x: x["Sales ($)"], reverse=True)
+    cum_s = 0.0
+    s_a, s_b, s_c = sales_cutoffs
+    for idx, r in enumerate(norm_rows):
+        cum_s += r["Sales ($)"]
+        cum_pct = (cum_s / total_sales) if total_sales > 0 else 0.0
+        r["Sales Cumulative %"] = cum_pct
+        if r["Sales ($)"] <= 0:
+            r["Sales Class"] = "D"
+        elif cum_pct <= s_a or (idx == 0 and cum_pct > s_a):
+            r["Sales Class"] = "A"
+        elif cum_pct <= s_b:
+            r["Sales Class"] = "B"
+        elif cum_pct <= s_c:
+            r["Sales Class"] = "C"
+        else:
+            r["Sales Class"] = "D"
+
+    # 2. Hits sorting & cumulative %
+    total_hits = sum(r["Hits"] for r in norm_rows)
+    norm_rows.sort(key=lambda x: x["Hits"], reverse=True)
+    cum_h = 0.0
+    h_a, h_b, h_c = hits_cutoffs
+    for idx, r in enumerate(norm_rows):
+        cum_h += r["Hits"]
+        cum_pct = (cum_h / total_hits) if total_hits > 0 else 0.0
+        r["Hits Cumulative %"] = cum_pct
+        if r["Hits"] <= 0:
+            r["Hits Class"] = "D"
+        elif cum_pct <= h_a or (idx == 0 and cum_pct > h_a):
+            r["Hits Class"] = "A"
+        elif cum_pct <= h_b:
+            r["Hits Class"] = "B"
+        elif cum_pct <= h_c:
+            r["Hits Class"] = "C"
+        else:
+            r["Hits Class"] = "D"
+
+    # 3. Multicriteria combination
+    matrix_map = {
+        ("A", "A"): "A", ("A", "B"): "A", ("B", "A"): "A",
+        ("A", "C"): "B", ("C", "A"): "B", ("B", "B"): "B", ("B", "C"): "B",
+        ("C", "B"): "C", ("A", "D"): "C", ("D", "A"): "B", ("B", "D"): "C",
+        ("D", "B"): "C", ("C", "C"): "C", ("C", "D"): "D", ("D", "C"): "D",
+        ("D", "D"): "D",
+    }
+    priority_order = {"A": 1, "B": 2, "C": 3, "D": 4}
+    rev_priority = {1: "A", 2: "B", 3: "C", 4: "D"}
+
+    for r in norm_rows:
+        sc = r["Sales Class"]
+        hc = r["Hits Class"]
+        if method == "priority":
+            p_val = min(priority_order.get(sc, 4), priority_order.get(hc, 4))
+            r["Classification"] = rev_priority[p_val]
+        else:
+            r["Classification"] = matrix_map.get((sc, hc), "C")
+        r["Multicriteria Matrix"] = f"{sc}-{hc}"
+
+    # Re-sort by Sales ($) descending
+    norm_rows.sort(key=lambda x: x["Sales ($)"], reverse=True)
+
+    class_order = ["A", "B", "C", "D"]
+    summary_rows = []
+    class_counts = {}
+    for cls in class_order:
+        sub = [r for r in norm_rows if r["Classification"] == cls]
+        c_items = len(sub)
+        class_counts[cls] = c_items
+        c_sales = sum(r["Sales ($)"] for r in sub)
+        c_hits = sum(r["Hits"] for r in sub)
+        pct_items = (c_items / len(norm_rows) * 100.0) if norm_rows else 0.0
+        pct_sales = (c_sales / total_sales * 100.0) if total_sales > 0 else 0.0
+        pct_hits = (c_hits / total_hits * 100.0) if total_hits > 0 else 0.0
+        summary_rows.append({
+            "Class": cls,
+            "Item Count": c_items,
+            "% of Items": round(pct_items, 1),
+            "Total Sales ($)": c_sales,
+            "% of Sales": round(pct_sales, 1),
+            "Total Hits": c_hits,
+            "% of Hits": round(pct_hits, 1),
+        })
+
+    return {
+        "is_valid": True,
+        "missing": [],
+        "num_rows": len(norm_rows),
+        "total_sales": total_sales,
+        "total_hits": total_hits,
+        "class_counts": class_counts,
+        "summary_rows": summary_rows,
+        "rows": norm_rows,
+    }
+
 _COLUMN_ALIASES: Dict[str, str] = {
     "sku_id": "sku",
     "item": "item_name",
@@ -1054,6 +1643,15 @@ def render_streamlit_app() -> None:
         else:
             st.success("Gemini API key available for session (grounded strictly in Python outputs).")
 
+        # --- DATA UPLOAD (Last section in sidebar) ---
+        st.divider()
+        st.header("Data Upload")
+        uploaded_file = st.file_uploader(
+            "Upload CSV File",
+            type=["csv"],
+            help="Upload an inventory CSV file with Product, Category, Units, and Unit Cost columns.",
+        )
+
     tab_agent, tab_csv = st.tabs(["Natural-Language Decision Agent", "CSV Data Upload & Analysis"])
 
     # --- Tab 1: Natural-Language Decision Agent ---
@@ -1104,112 +1702,338 @@ def render_streamlit_app() -> None:
                 else:
                     st.warning(response.explanation)
 
+def _render_sku_decision_analysis_view(raw_df: Any) -> None:
+    """Helper to render the multi-model SKU decision agent analysis on raw_df."""
+    all_analyzed_df, _ = analyze_inventory_dataframe(raw_df)
+
+    fcol1, fcol2, fcol3, fcol4 = st.columns(4)
+    avail_cats = sorted(all_analyzed_df["category"].dropna().unique().tolist()) if not all_analyzed_df.empty else []
+    avail_mods = sorted(all_analyzed_df["model_type"].dropna().unique().tolist()) if not all_analyzed_df.empty else []
+    avail_whs = sorted(all_analyzed_df["warehouse"].dropna().unique().tolist()) if not all_analyzed_df.empty else []
+
+    with fcol1:
+        sel_cats = st.multiselect("Filter Category", avail_cats, default=avail_cats)
+    with fcol2:
+        sel_mods = st.multiselect("Filter Inventory Model", avail_mods, default=avail_mods)
+    with fcol3:
+        sel_whs = st.multiselect("Filter Warehouse", avail_whs, default=avail_whs)
+    with fcol4:
+        group_dim = st.selectbox("Group Summary By", ["model_type", "category", "warehouse", "status"])
+
+    filtered_df, details_by_row = analyze_inventory_dataframe(
+        raw_df,
+        filter_categories=sel_cats,
+        filter_models=sel_mods,
+        filter_warehouses=sel_whs,
+    )
+
+    k1, k2, k3, k4 = st.columns(4)
+    success_cnt = int((filtered_df["status"] == "success").sum()) if not filtered_df.empty else 0
+    error_cnt = int((filtered_df["status"] == "error").sum()) if not filtered_df.empty else 0
+    verified_cnt = int(filtered_df["verification_passed"].sum()) if not filtered_df.empty else 0
+    total_cost_sum = (
+        float(filtered_df["annual_or_expected_cost"].fillna(0.0).sum()) if not filtered_df.empty else 0.0
+    )
+
+    k1.metric("Filtered SKUs", f"{len(filtered_df):,}")
+    k2.metric("Calculated Successfully", f"{success_cnt:,} (errors: {error_cnt})")
+    k3.metric("Verification Passed", f"{verified_cnt:,} / {len(filtered_df):,}")
+    k4.metric("Total Annual / Mismatch Cost", f"${total_cost_sum:,.2f}")
+
+    st.subheader("SKU-Level Deterministic Analysis Results")
+    st.dataframe(filtered_df, use_container_width=True)
+
+    if not filtered_df.empty:
+        st.download_button(
+            "Download Analyzed Results CSV",
+            data=filtered_df.to_csv(index=False),
+            file_name="analyzed_inventory_results.csv",
+            mime="text/csv",
+        )
+
+        st.subheader(f"Grouped Summary (`df.groupby('{group_dim}')`)")
+        grouped_df = groupby_inventory_dataframe(filtered_df, group_by=group_dim)
+        st.dataframe(grouped_df, use_container_width=True)
+        if not grouped_df.empty:
+            chart_df = grouped_df.set_index(group_dim)[["total_order_qty", "total_safety_stock"]]
+            st.bar_chart(chart_df)
+
+        successful_rows = filtered_df[filtered_df["status"] == "success"]
+        if not successful_rows.empty:
+            sku_options = [
+                (int(r["row_index"]), f"{r['sku']} — {r['item_name']} ({r['model_type']})")
+                for _, r in successful_rows.iterrows()
+            ]
+            selected_idx, _ = st.selectbox(
+                "Inspect Full 8-Section Calculation Trace for SKU:",
+                sku_options,
+                format_func=lambda item: item[1],
+            )
+            if selected_idx in details_by_row:
+                _render_verifiable_sections_ui(
+                    details_by_row[selected_idx],
+                    title=f"Verifiable Calculation Audit — Row #{selected_idx + 1}",
+                )
+
+
     # --- Tab 2: CSV Data Upload & Analysis ---
     with tab_csv:
         st.markdown(
-            "Upload an inventory CSV dataset into a **pandas DataFrame** to filter, group, "
-            "run deterministic Python inventory calculations across SKUs, and audit every result."
+            "Upload an external CSV file to perform **Multicriteria Inventory Classification (Sales & Hits -> A, B, C, D)** "
+            "or **Product Inventory Analysis** using **pandas**."
         )
-
-        col_up, col_tmpl = st.columns([3, 1])
-        with col_up:
-            uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
-        with col_tmpl:
-            st.download_button(
-                "Download Sample CSV",
-                data=SAMPLE_INVENTORY_CSV,
-                file_name="sample_inventory_data.csv",
-                mime="text/csv",
-            )
-            use_sample = st.checkbox("Use built-in multi-model sample CSV", value=(uploaded_file is None))
 
         raw_df = None
         if uploaded_file is not None:
-            raw_df = pd.read_csv(uploaded_file)
-        elif use_sample:
-            raw_df = pd.read_csv(io.StringIO(SAMPLE_INVENTORY_CSV))
+            try:
+                raw_df = pd.read_csv(uploaded_file)
+            except Exception as e:
+                st.error(f"Error reading uploaded CSV file into DataFrame: {e}")
+                return
+        else:
+            st.info(
+                "👈 **No file uploaded yet.** Please use the **Upload CSV File** control located in the "
+                "**Data Upload** section at the bottom of the left sidebar."
+            )
+            c_samp1, c_samp2, c_samp3 = st.columns(3)
+            with c_samp1:
+                st.download_button(
+                    "Download Sample Classification CSV",
+                    data=SAMPLE_CLASSIFICATION_CSV,
+                    file_name="sample_inventory_classification.csv",
+                    mime="text/csv",
+                )
+            with c_samp2:
+                st.download_button(
+                    "Download Sample Product CSV",
+                    data=SAMPLE_PRODUCT_CSV,
+                    file_name="sample_products.csv",
+                    mime="text/csv",
+                )
+            with c_samp3:
+                sample_choice = st.selectbox(
+                    "Load built-in demo dataset for preview:",
+                    [
+                        "None",
+                        "Classification Dataset (Item Number, Sales, Hits)",
+                        "Product Dataset (Product, Units, Cost)",
+                        "Multi-Model SKU Dataset",
+                    ],
+                )
+            if sample_choice == "Classification Dataset (Item Number, Sales, Hits)":
+                raw_df = pd.read_csv(io.StringIO(SAMPLE_CLASSIFICATION_CSV))
+            elif sample_choice == "Product Dataset (Product, Units, Cost)":
+                raw_df = pd.read_csv(io.StringIO(SAMPLE_PRODUCT_CSV))
+            elif sample_choice == "Multi-Model SKU Dataset":
+                raw_df = pd.read_csv(io.StringIO(SAMPLE_INVENTORY_CSV))
 
         if raw_df is None:
-            st.info("Upload a CSV file or check 'Use built-in multi-model sample CSV' to begin.")
             return
 
-        st.markdown(f"**Loaded Dataset:** `{len(raw_df):,}` rows x `{len(raw_df.columns)}` columns")
-        with st.expander("Raw Uploaded CSV Preview", expanded=False):
-            st.dataframe(raw_df, use_container_width=True)
+        # Check dataset schema
+        is_class_df, missing_class_cols = validate_classification_dataframe_columns(raw_df)
+        is_prod_df, missing_prod_cols = validate_product_dataframe_columns(raw_df)
 
-        # First compute normalized metadata values for filters
-        all_analyzed_df, _ = analyze_inventory_dataframe(raw_df)
+        cols_lower = [str(c).strip().lower() for c in raw_df.columns]
+        is_sku_df = "sku" in cols_lower or "model_type" in cols_lower or "annual_demand" in cols_lower
 
-        fcol1, fcol2, fcol3, fcol4 = st.columns(4)
-        avail_cats = sorted(all_analyzed_df["category"].dropna().unique().tolist()) if not all_analyzed_df.empty else []
-        avail_mods = sorted(all_analyzed_df["model_type"].dropna().unique().tolist()) if not all_analyzed_df.empty else []
-        avail_whs = sorted(all_analyzed_df["warehouse"].dropna().unique().tolist()) if not all_analyzed_df.empty else []
+        if is_class_df:
+            # -------------------------------------------------------------
+            # MULTICRITERIA INVENTORY CLASSIFICATION (Sales & Hits -> A, B, C, D)
+            # -------------------------------------------------------------
+            st.subheader("Multicriteria Inventory Classification (Sales & Hits)")
+            st.markdown(
+                "Joint classification evaluating both financial magnitude (**Sales ($)**) "
+                "and warehouse order activity (**Hits**) into **Classes A, B, C, and D**."
+            )
 
-        with fcol1:
-            sel_cats = st.multiselect("Filter Category", avail_cats, default=avail_cats)
-        with fcol2:
-            sel_mods = st.multiselect("Filter Inventory Model", avail_mods, default=avail_mods)
-        with fcol3:
-            sel_whs = st.multiselect("Filter Warehouse", avail_whs, default=avail_whs)
-        with fcol4:
-            group_dim = st.selectbox("Group Summary By", ["model_type", "category", "warehouse", "status"])
+            # Controls for classification method & thresholds
+            with st.expander("Classification Method & Threshold Parameters", expanded=False):
+                col_m1, col_m2 = st.columns(2)
+                with col_m1:
+                    class_method = st.selectbox(
+                        "Synthesis Rule",
+                        ["matrix", "priority"],
+                        format_func=lambda x: (
+                            "Flores-Whybark Joint Matrix Mapping"
+                            if x == "matrix"
+                            else "Joint Priority (min class: highest criticality)"
+                        ),
+                    )
+                with col_m2:
+                    st.caption(
+                        "• **Class A**: High Sales & High Hits (tight control, continuous review, prime slotting)\n"
+                        "• **Class B**: Moderate/High Sales or Hits (standard replenishment)\n"
+                        "• **Class C**: Lower velocity or low value items (streamlined review)\n"
+                        "• **Class D**: Tail/slow-moving/obsolete inventory (minimum stocking/phase-out)"
+                    )
 
-        filtered_df, details_by_row = analyze_inventory_dataframe(
-            raw_df,
-            filter_categories=sel_cats,
-            filter_models=sel_mods,
-            filter_warehouses=sel_whs,
-        )
+            # Execute classification calculations using pandas
+            classified_df, stats = classify_inventory_dataframe(raw_df, method=class_method)
 
-        # Summary KPIs
-        k1, k2, k3, k4 = st.columns(4)
-        success_cnt = int((filtered_df["status"] == "success").sum()) if not filtered_df.empty else 0
-        error_cnt = int((filtered_df["status"] == "error").sum()) if not filtered_df.empty else 0
-        verified_cnt = int(filtered_df["verification_passed"].sum()) if not filtered_df.empty else 0
-        total_cost_sum = (
-            float(filtered_df["annual_or_expected_cost"].fillna(0.0).sum()) if not filtered_df.empty else 0.0
-        )
+            # Metadata display
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Total Inventory Items", f"{stats['num_rows']:,}")
+            m2.metric("Total Annual Sales ($)", f"${stats['total_sales']:,.2f}")
+            m3.metric("Total Warehouse Hits", f"{stats['total_hits']:,.0f}")
 
-        k1.metric("Filtered SKUs", f"{len(filtered_df):,}")
-        k2.metric("Calculated Successfully", f"{success_cnt:,} (errors: {error_cnt})")
-        k3.metric("Verification Passed", f"{verified_cnt:,} / {len(filtered_df):,}")
-        k4.metric("Total Annual / Mismatch Cost", f"${total_cost_sum:,.2f}")
+            # Top KPI breakdown by Class
+            st.divider()
+            st.subheader("Classification Summary (Classes A, B, C, D)")
+            k1, k2, k3, k4 = st.columns(4)
+            c_cnts = stats["class_counts"]
+            k1.metric(
+                "Class A Items",
+                f"{c_cnts.get('A', 0):,} items",
+                delta=f"{c_cnts.get('A', 0)/stats['num_rows']*100:.1f}% of items",
+            )
+            k2.metric(
+                "Class B Items",
+                f"{c_cnts.get('B', 0):,} items",
+                delta=f"{c_cnts.get('B', 0)/stats['num_rows']*100:.1f}% of items",
+            )
+            k3.metric(
+                "Class C Items",
+                f"{c_cnts.get('C', 0):,} items",
+                delta=f"{c_cnts.get('C', 0)/stats['num_rows']*100:.1f}% of items",
+            )
+            k4.metric(
+                "Class D Items",
+                f"{c_cnts.get('D', 0):,} items",
+                delta=f"{c_cnts.get('D', 0)/stats['num_rows']*100:.1f}% of items",
+            )
 
-        st.subheader("SKU-Level Deterministic Analysis Results")
-        st.dataframe(filtered_df, use_container_width=True)
+            # Classification distribution table & charts
+            col_t1, col_t2 = st.columns([3, 2])
+            with col_t1:
+                st.markdown("**Stratification Breakdown:**")
+                styled_sum = stats["summary_df"].copy()
+                st.dataframe(
+                    styled_sum.style.format({
+                        "% of Items": "{:.1f}%",
+                        "Total Sales ($)": "${:,.2f}",
+                        "% of Sales": "{:.1f}%",
+                        "Total Hits": "{:,.0f}",
+                        "% of Hits": "{:.1f}%",
+                    }),
+                    use_container_width=True,
+                )
+            with col_t2:
+                st.markdown("**Sales vs. Hits Cross-Tabulation Matrix:**")
+                st.dataframe(stats["crosstab_df"], use_container_width=True)
 
-        if not filtered_df.empty:
+            # Visual charts
+            ch1, ch2 = st.columns(2)
+            with ch1:
+                st.caption("Sales ($) by Inventory Class")
+                st.bar_chart(stats["summary_df"].set_index("Class")["Total Sales ($)"])
+            with ch2:
+                st.caption("Warehouse Hits by Inventory Class")
+                st.bar_chart(stats["summary_df"].set_index("Class")["Total Hits"])
+
+            # Dataframe including the added classification results
+            st.divider()
+            st.subheader("Inventory Dataframe with Multicriteria Classification Results")
+            st.markdown(
+                "Added Columns: `Sales Cumulative %`, `Sales Class`, `Hits Cumulative %`, "
+                "`Hits Class`, and `Classification` (A, B, C, D)."
+            )
+            try:
+                st.dataframe(
+                    classified_df.style.format({
+                        "Sales ($)": "${:,.2f}",
+                        "Sales Cumulative": "${:,.2f}",
+                        "Sales Cumulative %": "{:.1%}",
+                        "Hits": "{:,.0f}",
+                        "Hits Cumulative": "{:,.0f}",
+                        "Hits Cumulative %": "{:.1%}",
+                    }),
+                    use_container_width=True,
+                )
+            except Exception:
+                st.dataframe(classified_df, use_container_width=True)
+
             st.download_button(
-                "Download Analyzed Results CSV",
-                data=filtered_df.to_csv(index=False),
-                file_name="analyzed_inventory_results.csv",
+                "Download Classified Inventory CSV",
+                data=classified_df.to_csv(index=False),
+                file_name="classified_inventory_results.csv",
                 mime="text/csv",
             )
 
-            st.subheader(f"Grouped Summary (`df.groupby('{group_dim}')`)")
-            grouped_df = groupby_inventory_dataframe(filtered_df, group_by=group_dim)
-            st.dataframe(grouped_df, use_container_width=True)
-            if not grouped_df.empty:
-                chart_df = grouped_df.set_index(group_dim)[["total_order_qty", "total_safety_stock"]]
-                st.bar_chart(chart_df)
+        elif is_prod_df:
+            # -------------------------------------------------------------
+            # PRODUCT INVENTORY ANALYSIS (Units & Unit Cost from Prompt 5)
+            # -------------------------------------------------------------
+            st.subheader("Uploaded Dataframe")
+            st.dataframe(raw_df, use_container_width=True)
 
-            # Single-SKU 8-section inspection
-            successful_rows = filtered_df[filtered_df["status"] == "success"]
-            if not successful_rows.empty:
-                sku_options = [
-                    (int(r["row_index"]), f"{r['sku']} — {r['item_name']} ({r['model_type']})")
-                    for _, r in successful_rows.iterrows()
-                ]
-                selected_idx, _ = st.selectbox(
-                    "Inspect Full 8-Section Calculation Trace for SKU:",
-                    sku_options,
-                    format_func=lambda item: item[1],
+            r1, r2, r3 = st.columns(3)
+            r1.metric("Number of Rows", f"{len(raw_df):,}")
+            r2.metric("Number of Columns", f"{len(raw_df.columns):,}")
+            with r3:
+                st.markdown(f"**Column Names:**\n`{', '.join(list(raw_df.columns))}`")
+
+            analysis = analyze_product_dataframe(raw_df)
+
+            st.divider()
+            st.subheader("Data Analysis Results")
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Total Units", f"{analysis['total_units']:,.0f}")
+            k2.metric("Average Unit Cost", f"${analysis['avg_unit_cost']:,.2f}")
+            k3.metric(
+                "Product with Highest Units",
+                f"{analysis['highest_units_product']}",
+                delta=f"{analysis['highest_units_value']:,.0f} units",
+            )
+            k4.metric("Total Inventory Value", f"${analysis['total_inventory_value']:,.2f}")
+
+            st.subheader("Total Units by Category")
+            cat_c1, cat_c2 = st.columns([1, 1])
+            with cat_c1:
+                st.dataframe(analysis["category_summary"], use_container_width=True)
+            with cat_c2:
+                try:
+                    chart_df = analysis["category_summary"].set_index("Category")
+                    st.bar_chart(chart_df["Units"])
+                except Exception:
+                    pass
+
+            st.subheader("Dataframe with Calculated Inventory Value (`Units × Unit Cost`)")
+            analyzed_df = analysis["analyzed_df"]
+            try:
+                st.dataframe(
+                    analyzed_df.style.format({
+                        "Units": "{:,.0f}",
+                        "Unit Cost": "${:,.2f}",
+                        "Inventory Value": "${:,.2f}",
+                    }),
+                    use_container_width=True,
                 )
-                if selected_idx in details_by_row:
-                    _render_verifiable_sections_ui(
-                        details_by_row[selected_idx],
-                        title=f"Verifiable Calculation Audit — Row #{selected_idx + 1}",
-                    )
+            except Exception:
+                st.dataframe(analyzed_df, use_container_width=True)
+
+            st.download_button(
+                "Download Analyzed Products CSV",
+                data=analyzed_df.to_csv(index=False),
+                file_name="analyzed_inventory_products.csv",
+                mime="text/csv",
+            )
+
+        elif is_sku_df:
+            _render_sku_decision_analysis_view(raw_df)
+
+        else:
+            st.error("❌ Uploaded CSV schema does not match any recognized inventory formats.")
+            st.markdown(
+                "**Expected Schemas:**\n"
+                f"1. **Inventory Classification:** `{', '.join(CLASSIFICATION_REQUIRED_COLUMNS)}` "
+                f"(Missing: `{', '.join(missing_class_cols)}`)\n"
+                f"2. **Product Analysis:** `{', '.join(PRODUCT_REQUIRED_COLUMNS)}` "
+                f"(Missing: `{', '.join(missing_prod_cols)}`)\n"
+                f"3. **Multi-Model Decision Agent:** `sku, model_type, annual_demand, ...`"
+            )
+            st.subheader("Uploaded CSV Preview")
+            st.dataframe(raw_df, use_container_width=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1233,11 +2057,168 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     if args.csv is not None:
-        if args.csv == "__SAMPLE__":
-            rows = load_sample_inventory_rows()
+        csv_source = args.csv
+        if csv_source == "__SAMPLE__":
+            raw_text = SAMPLE_CLASSIFICATION_CSV
+            rows = parse_csv_text(raw_text)
         else:
-            with open(args.csv, "r", encoding="utf-8") as fh:
-                rows = parse_csv_text(fh.read())
+            with open(csv_source, "r", encoding="utf-8") as fh:
+                raw_text = fh.read()
+            rows = parse_csv_text(raw_text)
+
+        first_row_keys = {str(k).strip().lower() for k in rows[0].keys()} if rows else set()
+
+        # Check for Multicriteria Inventory Classification format (Sales & Hits)
+        is_class_format = (
+            any("sales" in k for k in first_row_keys)
+            and any("hit" in k for k in first_row_keys)
+        )
+        is_product_format = all(col.lower() in first_row_keys for col in PRODUCT_REQUIRED_COLUMNS)
+
+        if is_class_format:
+            if pd is not None:
+                df = pd.read_csv(io.StringIO(raw_text))
+                valid_class, _ = validate_classification_dataframe_columns(df)
+                classified_df, stats = classify_inventory_dataframe(df)
+                if args.json:
+                    output_data = {
+                        "num_rows": stats["num_rows"],
+                        "total_sales": stats["total_sales"],
+                        "total_hits": stats["total_hits"],
+                        "class_counts": stats["class_counts"],
+                        "summary": stats["summary_df"].to_dict(orient="records"),
+                        "records": classified_df.to_dict(orient="records"),
+                    }
+                    print(json.dumps(output_data, indent=2, default=str))
+                else:
+                    print("=" * 72)
+                    print("MULTICRITERIA INVENTORY CLASSIFICATION (Sales & Hits -> A, B, C, D)")
+                    print("=" * 72)
+                    print(f"Total Inventory Items: {stats['num_rows']:,}")
+                    print(f"Total Annual Sales:   ${stats['total_sales']:,.2f}")
+                    print(f"Total Warehouse Hits:   {stats['total_hits']:,.0f}")
+                    print("-" * 72)
+                    print("CLASSIFICATION STRATIFICATION BREAKDOWN:")
+                    for _, row in stats["summary_df"].iterrows():
+                        print(
+                            f"  * Class {row['Class']}: {row['Item Count']} items ({row['% of Items']}%) | "
+                            f"Sales: ${row['Total Sales ($)']:,.2f} ({row['% of Sales']}%) | "
+                            f"Hits: {row['Total Hits']:,.0f} ({row['% of Hits']}%)"
+                        )
+                    print("\nITEM-LEVEL MULTICRITERIA CLASSIFICATION:")
+                    for _, row in classified_df.iterrows():
+                        item_num = row.get("Item Number", row.get("item_number", "SKU"))
+                        item_name = row.get("Item Name", row.get("item_name", "Item"))
+                        print(
+                            f"  * {item_num} - {item_name}: Sales=${row['Sales ($)']:,.2f} [Class {row['Sales Class']}] | "
+                            f"Hits={row['Hits']:,.0f} [Class {row['Hits Class']}] -> FINAL CLASS: {row['Classification']}"
+                        )
+            else:
+                analysis = classify_inventory_records(rows)
+                if args.json:
+                    print(json.dumps(analysis, indent=2, default=str))
+                else:
+                    print("=" * 72)
+                    print("MULTICRITERIA INVENTORY CLASSIFICATION (Pure-Python Fallback)")
+                    print("=" * 72)
+                    print(f"Total Inventory Items: {analysis['num_rows']:,}")
+                    print(f"Total Annual Sales:   ${analysis['total_sales']:,.2f}")
+                    print(f"Total Warehouse Hits:   {analysis['total_hits']:,.0f}")
+                    print("-" * 72)
+                    print("CLASSIFICATION STRATIFICATION BREAKDOWN:")
+                    for row in analysis["summary_rows"]:
+                        print(
+                            f"  * Class {row['Class']}: {row['Item Count']} items ({row['% of Items']}%) | "
+                            f"Sales: ${row['Total Sales ($)']:,.2f} ({row['% of Sales']}%) | "
+                            f"Hits: {row['Total Hits']:,.0f} ({row['% of Hits']}%)"
+                        )
+                    print("\nITEM-LEVEL MULTICRITERIA CLASSIFICATION:")
+                    for row in analysis["rows"]:
+                        item_num = row.get("Item Number", "SKU")
+                        item_name = row.get("Item Name", "Item")
+                        print(
+                            f"  * {item_num} - {item_name}: Sales=${row['Sales ($)']:,.2f} [Class {row['Sales Class']}] | "
+                            f"Hits={row['Hits']:,.0f} [Class {row['Hits Class']}] -> FINAL CLASS: {row['Classification']}"
+                        )
+            return 0
+
+        if is_product_format:
+            if pd is not None:
+                df = pd.read_csv(io.StringIO(raw_text))
+                analysis = analyze_product_dataframe(df)
+                if args.json:
+                    output_data = {
+                        "num_rows": analysis["num_rows"],
+                        "num_columns": analysis["num_columns"],
+                        "column_names": analysis["column_names"],
+                        "total_units": analysis["total_units"],
+                        "avg_unit_cost": analysis["avg_unit_cost"],
+                        "highest_units_product": analysis["highest_units_product"],
+                        "highest_units_value": analysis["highest_units_value"],
+                        "total_inventory_value": analysis["total_inventory_value"],
+                        "category_summary": analysis["category_summary"].to_dict(orient="records"),
+                        "records": analysis["analyzed_df"].to_dict(orient="records"),
+                    }
+                    print(json.dumps(output_data, indent=2, default=str))
+                else:
+                    print("=" * 72)
+                    print("PRODUCT CSV DATA PROCESSING & ANALYSIS (pandas)")
+                    print("=" * 72)
+                    print(f"Dataset Size: {analysis['num_rows']} rows x {analysis['num_columns']} columns")
+                    print(f"Column Names: {', '.join(analysis['column_names'])}")
+                    print("-" * 72)
+                    print("SUMMARY METRICS:")
+                    print(f"  * Total Units: {analysis['total_units']:,.0f}")
+                    print(f"  * Average Unit Cost: ${analysis['avg_unit_cost']:,.2f}")
+                    print(
+                        f"  * Product with Highest Units: {analysis['highest_units_product']} "
+                        f"({analysis['highest_units_value']:,.0f} units)"
+                    )
+                    print(f"  * Total Inventory Value: ${analysis['total_inventory_value']:,.2f}")
+                    print("\nTOTAL UNITS BY CATEGORY:")
+                    for _, row in analysis["category_summary"].iterrows():
+                        print(f"  * {row['Category']}: {row['Units']:,.0f} units")
+                    print("\nDATAFRAME WITH INVENTORY VALUE (Units x Unit Cost):")
+                    for _, row in analysis["analyzed_df"].iterrows():
+                        print(
+                            f"  * {row['Product']} ({row['Category']}): "
+                            f"{row['Units']:,.0f} units @ ${row['Unit Cost']:,.2f} = "
+                            f"${row['Inventory Value']:,.2f}"
+                        )
+            else:
+                analysis = analyze_product_records(rows)
+                if args.json:
+                    print(json.dumps(analysis, indent=2, default=str))
+                else:
+                    print("=" * 72)
+                    print("PRODUCT CSV DATA PROCESSING & ANALYSIS (Pure-Python Fallback)")
+                    print("=" * 72)
+                    print(f"Dataset Size: {analysis['num_rows']} rows x {analysis['num_columns']} columns")
+                    print(f"Column Names: {', '.join(analysis['column_names'])}")
+                    print("-" * 72)
+                    print("SUMMARY METRICS:")
+                    print(f"  * Total Units: {analysis['total_units']:,.0f}")
+                    print(f"  * Average Unit Cost: ${analysis['avg_unit_cost']:,.2f}")
+                    print(
+                        f"  * Product with Highest Units: {analysis['highest_units_product']} "
+                        f"({analysis['highest_units_value']:,.0f} units)"
+                    )
+                    print(f"  * Total Inventory Value: ${analysis['total_inventory_value']:,.2f}")
+                    print("\nTOTAL UNITS BY CATEGORY:")
+                    for cat, u in analysis["category_summary"]:
+                        print(f"  * {cat}: {u:,.0f} units")
+                    print("\nDATAFRAME WITH INVENTORY VALUE (Units x Unit Cost):")
+                    for row in analysis["rows"]:
+                        print(
+                            f"  * {row.get('Product', 'Unknown')} ({row.get('Category', '')}): "
+                            f"{row.get('Units', 0):,.0f} units @ ${row.get('Unit Cost', 0):,.2f} = "
+                            f"${row.get('Inventory Value', 0):,.2f}"
+                        )
+            return 0
+
+        # SKU-level multi-model CSV analysis fallback
+        if csv_source == "__SAMPLE__":
+            rows = load_sample_inventory_rows()
         summaries, details = analyze_inventory_records(rows)
         grouped = summarize_grouped_records(summaries, group_by=args.group_by)
         if args.json:
